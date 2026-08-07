@@ -1,128 +1,195 @@
-import re
-import pypdf
+import os
+import sys
+import json
+import io
+from typing import List, Optional
 import pandas as pd
+from pydantic import BaseModel, Field
+import pypdf
+from google import genai
+from google.genai import types
 
-def build_semester_mapping(reader):
-    subject_sem_map = {
-        "22LET201": "SEMESTER II", "22LET202": "SEMESTER II",
-        "22LET203": "SEMESTER II", "22LET204": "SEMESTER II",
-        "22NCC201": "SEMESTER II", "22NCC202": "SEMESTER II",
-        "22NCC203": "SEMESTER II",
-    }
-    current_sem = "SEMESTER I"
-    sem_regex = re.compile(r'^\s*SEMESTER\s+([I|V|X]+|\d+)\b', re.IGNORECASE)
-    code_regex = re.compile(r'\b(22[A-Z]{2,3}\d{3})\b')
+# ==========================================
+# 1. PYDANTIC SCHEMAS
+# ==========================================
 
-    for page_idx in range(4, 12):
-        text = reader.pages[page_idx].extract_text()
-        if not text:
-            continue
-        for line in text.split('\n'):
-            sem_match = sem_regex.match(line.strip())
-            if sem_match:
-                current_sem = f"SEMESTER {sem_match.group(1)}"
-            for code in code_regex.findall(line):
-                if code not in subject_sem_map:
-                    subject_sem_map[code] = current_sem
+class UnitModule(BaseModel):
+    module_no: str = Field(
+        description="Unit/Module number or identifier (e.g., 'UNIT I', '1', 'Module A')."
+    )
+    module_name: str = Field(
+        description="Name or title of the unit/module (e.g., 'Matrices and Calculus')."
+    )
+    topics: List[str] = Field(
+        description="List of distinct topics covered within this unit."
+    )
 
-    return subject_sem_map
+class CourseSyllabus(BaseModel):
+    semester: Optional[str] = Field(
+        default="NOT SPECIFIED",
+        description="Semester or Academic Year (e.g., 'SEMESTER I')."
+    )
+    subject_code: Optional[str] = Field(
+        default="NOT SPECIFIED",
+        description="Official course/subject code (e.g., '22CSE201')."
+    )
+    subject_name: str = Field(
+        description="Full course or subject name (e.g., 'Data Structures')."
+    )
+    modules: List[UnitModule] = Field(
+        description="List of all units/modules inside this course."
+    )
 
-def clean_text(text):
-    return re.sub(r'\s+', ' ', text).strip()
+class UniversalSyllabusExtraction(BaseModel):
+    syllabi: List[CourseSyllabus] = Field(
+        default_factory=list,
+        description="All courses found within the PDF segment."
+    )
 
-def extract_syllabus(pdf_path):
-    rows = []
-    ignored_topic_labels = {
-        "WRITING", "GRAMMAR", "VOCABULARY", "SPEAKING", "READING", 
-        "LIST OF EXPERIMENTS", "EXPERIMENTS", "SYLLABUS", "VERSION",
-        "COURSE OBJECTIVES:", "COURSE OUTCOME:"
-    }
 
+# ==========================================
+# 2. CHUNKED EXTRACTION ENGINE
+# ==========================================
+
+def split_pdf_bytes(pdf_path: str, chunk_size: int = 10):
+    """Splits a large PDF into smaller byte chunks in memory."""
     reader = pypdf.PdfReader(pdf_path)
-    sem_map = build_semester_mapping(reader)
+    total_pages = len(reader.pages)
     
-    for page_num in range(18, len(reader.pages)):
-        text = reader.pages[page_num].extract_text()
-        if not text:
-            continue
-
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
+    print(f"Total pages in document: {total_pages}")
+    
+    for start_page in range(0, total_pages, chunk_size):
+        end_page = min(start_page + chunk_size, total_pages)
+        writer = pypdf.PdfWriter()
         
-        # 1. Identify Course Code
-        course_code = None
-        for line in lines[:10]:
-            match = re.search(r'\b(22[A-Z]{2,3}\d{3})\b', line)
-            if match:
-                course_code = match.group(1)
-                break
+        for p in range(start_page, end_page):
+            writer.add_page(reader.pages[p])
+            
+        pdf_bytes = io.BytesIO()
+        writer.write(pdf_bytes)
+        pdf_bytes.seek(0)
         
-        if not course_code:
-            continue
+        yield (start_page + 1, end_page, pdf_bytes)
 
-        semester = sem_map.get(course_code, "SEMESTER I")
 
-        # 2. Complete Multiline Subject Title Extraction
-        course_title = ""
-        for i, line in enumerate(lines[:10]):
-            if course_code in line or "Course Title" in line or "COURSE TITLE" in line:
-                # Accumulate current line and up to 2 subsequent lines
-                combined_title_block = " ".join(lines[i:min(i+3, len(lines))])
-                
-                # Strip metadata, code, credit numbers, version tags
-                cleaned = combined_title_block.replace(course_code, '')
-                cleaned = re.sub(r'(?i)\b(Course\s*Title|Course\s*Code|L\s*T\s*P\s*J\s*C|Syllabus|version|v\.\s*\d+\.\d+|NIL)\b', '', cleaned)
-                cleaned = re.sub(r'[\d\s]{3,}', ' ', cleaned)
-                cleaned = clean_text(re.sub(r'(?i)(COURSE OBJECTIVES|Unit|UNIT).*', '', cleaned))
-                
-                if len(cleaned) > 2:
-                    course_title = cleaned
-                    break
+def extract_chunk(client: genai.Client, pdf_bytes: io.BytesIO, start_p: int, end_p: int) -> UniversalSyllabusExtraction:
+    """Processes a chunk of PDF pages using Gemini."""
+    print(f"\nProcessing pages {start_p} to {end_p}...")
+    
+    # Upload byte chunk
+    pdf_file = client.files.upload(
+        file=pdf_bytes, 
+        config=types.UploadFileConfig(mime_type="application/pdf")
+    )
 
-        # 3. Complete Multiline Module Name & Topic Extraction
-        current_unit_no = ""
-        current_unit_name = ""
+    prompt = """
+    You are an expert academic document parser.
+    Examine the uploaded PDF pages and extract all course syllabi, units/modules, and individual topics present in these pages.
 
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            unit_match = re.match(r'^(UNIT|Unit)[-\s]*(\d+|[I|V|X]+)\s*(.*)$', line)
-            if unit_match:
-                current_unit_no = unit_match.group(2)
-                raw_unit_name = unit_match.group(3)
-                
-                # Check if unit name spills over onto the next line
-                if i + 1 < len(lines) and not re.search(r'\d+(\+\d+)?\s*HOURS', raw_unit_name, flags=re.IGNORECASE):
-                    next_l = lines[i+1]
-                    if not re.search(r'(Writing|Grammar|Vocabulary|COURSE|UNIT|\d+\s*HOURS)', next_l, flags=re.IGNORECASE):
-                        raw_unit_name += " " + next_l
-                        i += 1
-                        
-                current_unit_name = clean_text(re.sub(r'\d+(\+\d+)?\s*HOURS.*', '', raw_unit_name, flags=re.IGNORECASE))
-                i += 1
-                continue
+    Rules:
+    1. Extract every course/subject present on these pages.
+    2. Do NOT split recognized compound terms (e.g., 'Cayley-Hamilton Theorem', 'Gram-Schmidt Process').
+    3. Omit administrative content like Course Outcomes, Textbooks, References, and Objectives.
+    4. If a page contains no syllabus modules/units, return an empty "syllabi" list.
+    """
 
-            if current_unit_no and not re.match(r'^(COURSE OBJECTIVES|COURSE OUTCOME|TEXT BOOK|REFERENCE|TOTAL)', line, re.IGNORECASE):
-                parts = re.split(r'[–—;]', line)
-                for part in parts:
-                    cleaned_topic = clean_text(part)
-                    
-                    if (len(cleaned_topic) > 3 and 
-                        cleaned_topic.upper() not in ignored_topic_labels and 
-                        not re.match(r'^\d+(\+\d+)?\s*HOURS$', cleaned_topic, flags=re.IGNORECASE)):
-                        
-                        rows.append({
-                            "SEMESTER": semester,
-                            "SUBJECT CODE": course_code,
-                            "SUBJECT NAME": course_title,
-                            "MODULE_No": current_unit_no,
-                            "MODULE NAME": current_unit_name,
-                            "TOPIC": cleaned_topic
-                        })
-            i += 1
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[pdf_file, prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=UniversalSyllabusExtraction,
+                temperature=0.1,
+                max_output_tokens=8192
+            ),
+        )
 
+        if response.parsed is not None:
+            return response.parsed
+
+        if response.text:
+            return UniversalSyllabusExtraction.model_validate_json(response.text)
+
+        return UniversalSyllabusExtraction(syllabi=[])
+
+    except Exception as e:
+        print(f"Warning: Failed to extract pages {start_p}-{end_p}: {e}")
+        return UniversalSyllabusExtraction(syllabi=[])
+        
+    finally:
+        try:
+            client.files.delete(name=pdf_file.name)
+        except Exception:
+            pass
+
+
+def extract_full_syllabus(pdf_path: str, chunk_size: int = 10) -> UniversalSyllabusExtraction:
+    if not os.path.exists(pdf_path):
+        raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+
+    client = genai.Client()
+    combined_extraction = UniversalSyllabusExtraction(syllabi=[])
+
+    # Process PDF in chunks of 10 pages
+    for start_p, end_p, chunk_bytes in split_pdf_bytes(pdf_path, chunk_size=chunk_size):
+        chunk_result = extract_chunk(client, chunk_bytes, start_p, end_p)
+        if chunk_result and chunk_result.syllabi:
+            combined_extraction.syllabi.extend(chunk_result.syllabi)
+
+    return combined_extraction
+
+
+# ==========================================
+# 3. DATAFRAME CONVERSION & EXPORT
+# ==========================================
+
+def syllabus_to_dataframe(structured_data: UniversalSyllabusExtraction) -> pd.DataFrame:
+    rows = []
+    for course in structured_data.syllabi:
+        for module in course.modules:
+            for topic_str in module.topics:
+                rows.append({
+                    "SEMESTER": course.semester,
+                    "SUBJECT CODE": course.subject_code,
+                    "SUBJECT NAME": course.subject_name,
+                    "MODULE NO": module.module_no,
+                    "MODULE NAME": module.module_name,
+                    "TOPIC": topic_str
+                })
     return pd.DataFrame(rows)
 
+
 if __name__ == "__main__":
-    df = extract_syllabus("JNN CSE.pdf")
-    df.to_excel("Syllabus_Structured_Output_Perfect.xlsx", index=False)
-    print("Extraction complete! Output saved to Syllabus_Structured_Output_Perfect.xlsx")
+    pdf_file_path = "JNN CSE.pdf"
+
+    if not os.path.exists(pdf_file_path):
+        for file in os.listdir("."):
+            if file.endswith(".pdf"):
+                pdf_file_path = file
+                break
+
+    print(f"Target document: {pdf_file_path}")
+
+    try:
+        # Process in chunks of 10 pages
+        pydantic_output = extract_full_syllabus(pdf_file_path, chunk_size=10)
+        df_syllabus = syllabus_to_dataframe(pydantic_output)
+        
+        excel_output = "Syllabus_Structured_Output.xlsx"
+        json_output = "Syllabus_Structured_Output.json"
+        
+        df_syllabus.to_excel(excel_output, index=False)
+        with open(json_output, "w", encoding="utf-8") as f:
+            f.write(pydantic_output.model_dump_json(indent=2))
+
+        print("\n Extraction Completed Successfully!")
+        print(f"Total topics extracted: {len(df_syllabus)}")
+        print(f"Saved Excel file: {excel_output}")
+
+        if not df_syllabus.empty:
+            print("\n--- Output Preview ---")
+            print(df_syllabus.head(10).to_string())
+
+    except Exception as e:
+        print(f"\n Execution Error: {e}", file=sys.stderr)
