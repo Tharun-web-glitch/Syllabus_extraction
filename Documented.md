@@ -59,7 +59,7 @@
 
 > **Key Takeaway:** Static chunking without cross-page state retention or semantic boundary awareness creates data loss at page splits.
 
-```markdown
+
 ## 2. Summary of Models & Techniques Evaluated
 
 | Version / Approach | Core Engine | Primary Use Case | Output Quality | Failure Mode / Limitation |
