@@ -1,20 +1,18 @@
+## Current Approach: In-Memory Chunked LLM Extraction (v2.1)
 
-Universal Academic Syllabus Extractor
-  A Python tool that extracts, structures, and exports course syllabi from PDF documents into Excel (.xlsx) and JSON formats using the Gemini API and Pydantic.
+* **Model / Version:** `gemini-2.5-flash` with Pydantic v2 & `pypdf` in-memory binary writer.
+* **How It Works:** Slices the full PDF into 10-page chunks in RAM (`io.BytesIO()`), sends each chunk to Gemini to extract structured topics, and merges everything into an Excel sheet.
 
-📌 Features
-AI-Powered Parsing: Uses Gemini 2.5 Flash to automatically extract course codes, titles, modules, and topics.
-In-Memory Chunking: Splits large PDFs into smaller page chunks using pypdf to prevent memory and token output limits.
-Structured Output: Exports data into clean Excel spreadsheets (.xlsx) and hierarchical JSON files (.json).
+### What Worked Well ✅
+* **No Huge Files:** Slicing pages in memory prevented token overflow from sending the entire PDF at once.
+* **Structured Output:** Automatically extracted courses, modules, and topics into clean JSON and Excel formats.
+* **Automatic Cleanup:** Successfully deleted temporary files from the Gemini API after each request.
 
-How It Works
-Chunking: The script splits the PDF into 10-page chunks in memory.
-LLM Processing: Each chunk is sent to the Gemini API with a strict Pydantic schema to extract courses and topics.
-Data Flattening: Extracted nested data is flattened into a Pandas DataFrame and saved as an Excel spreadsheet.
+### What Didn't Work / Limitations ⚠️
+* **Token Limit Truncation:** Large or dense page chunks (like lab experiment lists) still exceeded token output limits, causing `EOF while parsing` JSON errors.
+* **Split Headers:** Slicing by fixed 10-page blocks cut some subjects in half across chunks, losing course codes and titles.
+* **Missing Semesters:** Detailed syllabus pages did not repeat top-level semester names, leading to `NOT SPECIFIED` values in the output.
+* **Rate Limits:** Rapid sequential calls without delays occasionally hit Gemini's free-tier rate limits (`429 RESOURCE_EXHAUSTED`).
 
-Limitations:
-Rate Limits (429 Error): Rapid chunk requests can exceed Gemini's free tier quota (20 requests/min), causing API failures and missing output rows.  
-Response Truncation (EOF Error): Heavy text chunks can cause Gemini to hit its 8,192 token output limit, cutting off the JSON mid-sentence and causing parsing errors.
-Split Page Context: Fixed page chunking (e.g., 1–10, 11–20) can cut a course in half, causing the AI to miss course codes or titles.
-Missing Semester Data: Detailed syllabus pages rarely repeat top-level headers like SEMESTER I, causing the output to default to "NOT SPECIFIED".
-Internet Dependency: Requires a continuous internet connection and an active GEMINI_API_KEY to run.
+### Key Takeaway 💡
+Chunking pages in memory keeps prompts small, but it needs smaller chunks (or delay throttling) and a pre-mapping step to capture missing semester information reliably.
