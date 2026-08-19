@@ -1,22 +1,5 @@
 ## Current Approach: In-Memory Chunked LLM Extraction (v2.1)
 
-## 🛠️ Current Approach: In-Memory Chunked LLM Extraction
-
-To overcome context window limits and eliminate fragile regex rules, the parser currently uses **Gemini 2.5 Flash** combined with **In-Memory PDF Chunking** and **Pydantic schema validation**.
-
-┌─────────────────┐       ┌────────────────────────┐       ┌───────────────────────┐
-│   Syllabus PDF  │ ───►  │  In-Memory Chunking    │ ───►  │  Gemini 2.5 Flash     │
-│    (Full Doc)   │       │ (pypdf / 10-pg slices) │       │ (Strict JSON Schema)  │
-└─────────────────┘       └────────────────────────┘       └───────────────────────┘
-│
-┌─────────────────┐       ┌────────────────────────┐                   ▼
-│  Excel & JSON   │ ◄───  │ Tabular Flattening     │ ◄───  ┌───────────────────────┐
-│     Outputs     │       │   (Pandas DataFrame)   │       │ Pydantic Validation   │
-└─────────────────┘       └────────────────────────┘       └───────────────────────┘
-
-
----
-
 ### How the Pipeline Works
 
 1. **In-Memory Page Slicing (`pypdf`):**
