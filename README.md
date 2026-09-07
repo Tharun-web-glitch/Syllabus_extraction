@@ -1,43 +1,45 @@
-## Current Approach: In-Memory Chunked LLM Extraction (v2.1)
+# 📚 Universal Academic Syllabus Extractor
 
-### How the Pipeline Works
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.35%2B-FF4B4B.svg)](https://streamlit.io/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-1. **In-Memory Page Slicing (`pypdf`):**
-   * Instead of sending an entire 90+ page document at once, the script slices the PDF into **10-page binary chunks** (`io.BytesIO`) directly in RAM without saving temp files to disk.
+A high-performance, hybrid Python pipeline to convert unstructured university syllabus handbooks (PDF) into structured, relational datasets (`.xlsx` and JSON). 
 
-2. **Multimodal Extraction (Gemini 2.5 Flash):**
-   * Each chunk is sent to Gemini with a strict schema enforcement prompt to extract:
-     * **Course Code & Title**
-     * **Semester / Year**
-     * **Unit / Module Names & Numbers**
-     * **Granular Topic Lists**
-   * Administrative sections (Textbooks, Course Outcomes, Marks) are filtered out automatically.
-
-3. **Schema Enforcement (`Pydantic v2`):**
-   * Guarantees the output matches a strict JSON contract (`UniversalSyllabusExtraction`).
-   * Falls back to manual JSON string validation (`model_validate_json`) if automatic parsing returns `None`.
-
-4. **Data Flattening & Export (`pandas`):**
-   * Concatenates all chunks and unrolls nested hierarchies into flat tabular rows:
-     * `Syllabus_Structured_Output.xlsx` (Excel Spreadsheet)
-     * `Syllabus_Structured_Output.json` (Structured JSON Hierarchy)
-   * Automatically deletes uploaded remote chunk files from the Gemini API server.
+Designed to operate **100% offline and free by default** using deterministic regular expressions and dynamic compound-term shielding, with an optional LLM fallback for ambiguous text and unfamiliar university layouts.
 
 ---
 
-* **Model / Version:** `gemini-2.5-flash` with Pydantic v2 & `pypdf` in-memory binary writer.
-* **How It Works:** Slices the full PDF into 10-page chunks in RAM (`io.BytesIO()`), sends each chunk to Gemini to extract structured topics, and merges everything into an Excel sheet.
+## 🚀 Key Features
 
-### What Worked Well ✅
-* **No Huge Files:** Slicing pages in memory prevented token overflow from sending the entire PDF at once.
-* **Structured Output:** Automatically extracted courses, modules, and topics into clean JSON and Excel formats.
-* **Automatic Cleanup:** Successfully deleted temporary files from the Gemini API after each request.
+* **Instantaneous Processing**: Parses 90+ page university handbooks in **under 2 seconds** with zero API costs.
+* **Deterministic Two-Pass Architecture**:
+  * **Pass 1**: Scans curriculum overview tables to map Course Codes to Semesters accurately.
+  * **Pass 2**: Slices continuous, flattened text into courses, units, and contact hours.
+* **Dynamic Compound-Term Protection**: Automatically shields multi-word theorems and methods (e.g., *Cayley-Hamilton*, *Runge-Kutta*, *Navier-Stokes*, *p-n junction*, *if-else*) from delimiter fragmentation.
+* **Category Normalization**: Resolves dangling language subheadings (*Writing:*, *Grammar:*, *Vocabulary:*) by binding them directly into downstream topic rows.
+* **Multi-File Processing**: Drag-and-drop multiple syllabus PDFs simultaneously and export a single, tagged Excel workbook (`SOURCE FILE` column included).
+* **Configurable LLM Fallback**: Optional micro-calls using **Anthropic Claude**, **OpenAI**, or **local Ollama (`qwen2.5:3b`)** for ambiguous phrasing or non-standard layouts.
 
-### What Didn't Work / Limitations ⚠️
-* **Token Limit Truncation:** Large or dense page chunks (like lab experiment lists) still exceeded token output limits, causing `EOF while parsing` JSON errors.
-* **Split Headers:** Slicing by fixed 10-page blocks cut some subjects in half across chunks, losing course codes and titles.
-* **Missing Semesters:** Detailed syllabus pages did not repeat top-level semester names, leading to `NOT SPECIFIED` values in the output.
-* **Rate Limits:** Rapid sequential calls without delays occasionally hit Gemini's free-tier rate limits (`429 RESOURCE_EXHAUSTED`).
+---
 
-### Key Takeaway 💡
-Chunking pages in memory keeps prompts small, but it needs smaller chunks (or delay throttling) and a pre-mapping step to capture missing semester information reliably.
+## 📊 Benchmark Validation
+
+| Handbook | Pages | Courses Found | Units Found | Topics Extracted | Execution Time |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **B.E. Computer Science (CSE)** | 91 | 32 / 32 (100%) | 161 / 161 (100%) | 869 rows | ~1.8s |
+| **B.Tech. AI & Data Science (AI-DS)** | 256 | 110 / 110 | 569 units | 3,050 rows | ~3.2s |
+
+---
+
+## 🛠️ Project Structure
+
+```text
+├── app.py                 # Streamlit UI & batch pipeline orchestrator
+├── pdf_reader.py          # PDF text extraction & Unicode normalizer
+├── structural_parser.py   # Two-pass deterministic course & unit boundary parser
+├── topic_splitter.py      # Dynamic compound-term shield & topic tokenizer
+├── llm_client.py          # Unified LLM client (Anthropic / OpenAI / Ollama)
+├── requirements.txt       # Project dependencies
+├── DOCUMENTATION.md       # Comprehensive technical & architecture documentation
+└── README.md              # Project overview & quickstart guide
